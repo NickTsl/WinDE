@@ -6,6 +6,7 @@ from miasm.analysis.dse import DSEPathConstraint
 from miasm.expression.expression import ExprMem, ExprId, ExprInt, ExprAssign
 from miasm.core.locationdb import LocationDB
 from miasm.jitter.csts import PAGE_READ, PAGE_WRITE, EXCEPT_INT_XX
+from miasm.core.interval import interval
 
 from future.utils import viewitems
 
@@ -69,9 +70,13 @@ jitter.init_run(run_addr)
 dse = DSEPathConstraint(machine, loc_db, produce_solution=strategy)
 dse.attach(jitter)
 
+dse.symbolize_memory(interval([(0x140000000, 0x140000000 + pe_info.virtual_size - 1)]))
+
 # Concretize everything except the argument
 regs = jitter.lifter.arch.regs
 RCXtest = ExprId("RCXtest", 64)
+
+#dse.update_state_from_concrete()
 
 dse.update_state({
     dse.lifter.arch.regs.RCX: RCXtest,
@@ -79,18 +84,11 @@ dse.update_state({
 
 # test breakpoint
 def test_bp(jitter):
-    print("test_bp reached!")
     print("pc: " + hex(jitter.pc))
 
     return False
 
 jitter.add_breakpoint(0x14000501B, test_bp)
-
-def exception_int(jitter):
-    print("interrupt!")
-    return False
-
-jitter.add_exception_handler(EXCEPT_INT_XX, exception_int)
 
 # Explore solutions
 todo = set([ExprInt(run_addr, 8)])
@@ -100,16 +98,16 @@ snapshot = dse.take_snapshot()
 # Only needed for the final output
 reaches = set()
 
-while todo:
+for i in range(100):
     # Get the next candidate
-    arg_value = todo.pop()
+    #arg_value = todo.pop()
 
     # Avoid using twice the same input
-    if arg_value in done:
-        continue
-    done.add(arg_value)
+   # if arg_value in done:
+   #     continue
+   # done.add(arg_value)
 
-    print("Run with ARG = %s" % arg_value)
+#    print("Run with ARG = %s" % arg_value)
     # Restore state, while keeping already found solutions
     dse.restore_snapshot(snapshot, keep_known_solutions=True)
 
@@ -118,9 +116,6 @@ while todo:
 
     # Set the argument value in the jitter context
      # jitter.eval_expr(ExprAssign(arg_addr, arg_value))
-
-    print("pc: " + hex(jitter.pc))
-
 
     # Launch
     jitter.continue_run()
@@ -132,18 +127,18 @@ while todo:
     # - last edge for branch coverage
     # - execution path for path coverage
 
-    for sol_ident, model in viewitems(dse.new_solutions):
-        
+    for solution, model in viewitems(dse.new_solutions):
 
-        print("Found a solution to reach: %s" % str(sol_ident))
-        print(hex(loc_db.get_location_offset(sol_ident.loc_key)))
+        print("Found a solution to reach: %s" % str(solution))
+        print(hex(loc_db.get_location_offset(solution.loc_key)))
+
         # Get the argument to use as a Miasm Expr (RCXtest)
         sol_value = model.eval(dse.z3_trans.from_expr(dse.lifter.arch.regs.RCX)).__str__()
 
         # Display info and update storages
-        print("\tARG = %s" % sol_value)
-        todo.add(sol_expr)
-        reaches.add(sol_ident)
+#        print("\tARG = %s" % sol_value)
+ #       todo.add(sol_expr)
+        reaches.add(solution)
 
 print(
     "Found %d input, to reach %d element of coverage" % (
