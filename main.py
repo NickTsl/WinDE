@@ -10,7 +10,16 @@ from miasm.core.interval import interval
 
 from future.utils import viewitems
 
+
+# SUMMARY:
+# - Parses the machine code from address from the entry to address 0x14000501B
+# - Finds every possible if statement path, from entry to 0x14000501B
+# - Stores the variable expressions/constraints required to reach each if statement path (stuff like x=5, y>10, etc)
+
+
+
 target_binary = "CorsairLLAccess64.sys"
+stop_address = 0x14000501B
 
 pe_info = lief.parse(target_binary)
 
@@ -76,48 +85,39 @@ dse.symbolize_memory(interval([(0x140000000, 0x140000000 + pe_info.virtual_size 
 regs = jitter.lifter.arch.regs
 RCXtest = ExprId("RCXtest", 64)
 
-#dse.update_state_from_concrete()
-
 dse.update_state({
     dse.lifter.arch.regs.RCX: RCXtest,
 })
 
 # test breakpoint
+
 def test_bp(jitter):
-    print("pc: " + hex(jitter.pc))
+  #  print("pc: " + hex(jitter.pc))
 
     return False
 
-jitter.add_breakpoint(0x14000501B, test_bp)
+jitter.add_breakpoint(stop_address, test_bp)
 
 # Explore solutions
 todo = set([ExprInt(run_addr, 8)])
 done = set()
 snapshot = dse.take_snapshot()
 
-# Only needed for the final output
+# ignore this line
+
 reaches = set()
 
 for i in range(100):
-    # Get the next candidate
-    #arg_value = todo.pop()
 
-    # Avoid using twice the same input
-   # if arg_value in done:
-   #     continue
-   # done.add(arg_value)
-
-#    print("Run with ARG = %s" % arg_value)
     # Restore state, while keeping already found solutions
+
     dse.restore_snapshot(snapshot, keep_known_solutions=True)
 
-    # Reinit jitter (reset jitter.running, etc.)
+    # reset jitter
     jitter.init_run(run_addr)
 
-    # Set the argument value in the jitter context
-     # jitter.eval_expr(ExprAssign(arg_addr, arg_value))
-
     # Launch
+
     jitter.continue_run()
 
 
